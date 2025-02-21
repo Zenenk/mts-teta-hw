@@ -1,0 +1,177 @@
+ИНСТРУКЦИЯ ПО ЗАПУСКУ HDFS-КЛАСТЕРА
+
+-----------------------------------------------------------
+1. Проверка связи и первоначальное подключение
+-----------------------------------------------------------
+1.1. Проверка доступности:
+    ping 176.109.91.38
+
+1.2. Подключение:
+    ssh team@176.109.91.38
+
+-----------------------------------------------------------
+2. Настройка имен узлов через файл /etc/hosts
+-----------------------------------------------------------
+На каждом узле (особенно на неймноде nn) отредактировать файл /etc/hosts:
+    sudo vim /etc/hosts
+
+Добавить следующие строки:
+    192.168.1.134   team-33-jn
+    192.168.1.135   team-33-nn
+    192.168.1.136   team-33-dn-00
+    192.168.1.137   team-33-dn-01
+
+для каждой из узлов jn, dn-00 и dn-01 заккоментировать соответсвующие строки с localhost и добавленная строка с именем ноды,
+и изменить строку 127.0.1.1 team-33-** на 127.0.1.1 team-33-**.
+
+Особый момент для неймноды (nn):
+    - Оставить эти четыре добавленные строки без изменений.
+    - Если в файле присутствует строка с "127.0.0.1 team-33-nn", закомментировать её.
+
+-----------------------------------------------------------
+3. Настройка SSH и обмен ключами между узлами
+-----------------------------------------------------------
+В WSL Ubuntu:
+
+3.1. Создать SSH-ключ для пользователя team:
+    ssh-keygen -t ed25519
+
+3.2. Скопировать публичный ключ на все узлы:
+    scp ~/.ssh/id_ed25519.pub team@team-33-jn:/home/team/.ssh/authorized_keys
+    scp ~/.ssh/id_ed25519.pub team@team-33-nn:/home/team/.ssh/authorized_keys
+    scp ~/.ssh/id_ed25519.pub team@team-33-dn-00:/home/team/.ssh/authorized_keys
+    scp ~/.ssh/id_ed25519.pub team@team-33-dn-01:/home/team/.ssh/authorized_keys
+
+На каждом узле для пользователя "hadoop":
+
+3.3. Создать пользователя hadoop (если ещё не создан):
+    sudo adduser hadoop
+
+3.4. Переключиться в пользователя hadoop:
+    sudo -i -u hadoop
+
+3.5. Запустить tmux (для сохранения сессии):
+    tmux
+
+3.6. Сгенерируйте SSH-ключ для пользователя hadoop:
+    ssh-keygen -t ed25519
+
+3.7. Скопировать публичный ключ в файл authorized_keys:
+    cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+
+3.8. Распространить каталог .ssh/ пользователя hadoop с одного узла (например, team-33-jn) на остальные:
+    scp -r ~/.ssh/ team-33-nn:/home/hadoop
+    scp -r ~/.ssh/ team-33-dn-00:/home/hadoop
+    scp -r ~/.ssh/ team-33-dn-01:/home/hadoop
+
+-----------------------------------------------------------
+4. Скачивание и установка Hadoop
+-----------------------------------------------------------
+На узле team-33-jn (в сессии пользователя hadoop):
+
+4.1. Скачать дистрибутив Hadoop 3.4.0:
+    wget https://dlcdn.apache.org/hadoop/common/hadoop-3.4.0/hadoop-3.4.0.tar.gz
+
+4.2. Скопировать архив на остальные узлы:
+    scp hadoop-3.4.0.tar.gz team-33-nn:/home/hadoop
+    scp hadoop-3.4.0.tar.gz team-33-dn-00:/home/hadoop
+    scp hadoop-3.4.0.tar.gz team-33-dn-01:/home/hadoop
+
+4.3. Распаковать архив на всех узлах:
+    tar -xzvf hadoop-3.4.0.tar.gz
+
+На остальных узлах (под пользователем hadoop):
+
+4.4. Подключиться к узлу (например, team-33-nn) и распаковать архив:
+    tar -xzvf hadoop-3.4.0.tar.gz
+
+-----------------------------------------------------------
+5. Настройка переменных окружения
+-----------------------------------------------------------
+На узле team-33-jn (под пользователем hadoop):
+
+5.1. Открыть файл профиля:
+    vim ~/.profile
+
+5.2. Добавить в конец файла следующие строки:
+    export HADOOP_HOME=/home/hadoop/hadoop-3.4.0
+    export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+    export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+
+5.3. Применить изменения:
+    source ~/.profile
+
+5.4. Проверить версию Hadoop:
+    hadoop version
+
+5.5. Скопировать файл .profile на остальные узлы:
+    scp ~/.profile team-33-nn:/home/hadoop
+    scp ~/.profile team-33-dn-00:/home/hadoop
+    scp ~/.profile team-33-dn-01:/home/hadoop
+
+-----------------------------------------------------------
+6. Настройка конфигурационных файлов Hadoop
+-----------------------------------------------------------
+Перейти в каталог конфигурации Hadoop:
+    cd /home/hadoop/hadoop-3.4.0/etc/hadoop
+
+6.1. Файл hadoop-env.sh:
+    - Открыть файл:
+          vim hadoop-env.sh
+    - Найти строку с JAVA_HOME, раскомментировать и изменить её:
+          JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+6.2. Файл core-site.xml:
+    - Открыть файл:
+          vim core-site.xml
+    - Добавить следующий блок внутрь <configuration>:
+          <property>
+              <name>fs.defaultFS</name>
+              <value>hdfs://team-33-nn:9000</value>
+          </property>
+
+6.3. Файл hdfs-site.xml:
+    - Открыть файл:
+          vim hdfs-site.xml
+    - Добавить или изменить параметр репликации:
+          <property>
+              <name>dfs.replication</name>
+              <value>3</value>
+          </property>
+
+6.4. Файл workers:
+    - Открыть файл:
+          vim workers
+    - Закомментировать строку с "localhost" (если она есть) и добавить имена узлов, где будут запускаться DataNode:
+          team-33-nn
+          team-33-dn-00
+          team-33-dn-01
+
+6.5. Распространить файлы конфигурации на все узлы:
+    scp hadoop-env.sh core-site.xml hdfs-site.xml workers team-33-nn:/home/hadoop/hadoop-3.4.0/etc/hadoop
+    scp hadoop-env.sh core-site.xml hdfs-site.xml workers team-33-dn-00:/home/hadoop/hadoop-3.4.0/etc/hadoop
+    scp hadoop-env.sh core-site.xml hdfs-site.xml workers team-33-dn-01:/home/hadoop/hadoop-3.4.0/etc/hadoop
+
+-----------------------------------------------------------
+7. Форматирование NameNode и запуск кластера
+-----------------------------------------------------------
+7.1. Форматирование NameNode (на неймноде team-33-nn):
+
+    7.1.1. Подключиться к узлу team-33-nn:
+           ssh hadoop@team-33-nn
+
+    7.1.2. Перейдти в каталог Hadoop:
+           cd /home/hadoop/hadoop-3.4.0
+
+    7.1.3. Отформатировать файловую систему NameNode:
+           bin/hdfs namenode -format
+
+7.2. Запуск кластера (на одном из узлов, например, team-33-jn):
+
+    7.2.1. Запустить демоны HDFS:
+           sbin/start-dfs.sh
+
+    7.2.2. Проверить запущенные процессы:
+           jps
+       
+Ожидается увидеть процессы NameNode, SecondaryNameNode и DataNode на соответствующих узлах.
