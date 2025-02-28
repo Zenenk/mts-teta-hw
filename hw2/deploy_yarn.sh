@@ -66,4 +66,4 @@ if [ -n "$1" ]; then
   ssh "$SSH_USER@$MASTER_NODE" "hdfs dfs -ls /test"
 fi
 
-echo "Развернуть YARN завершить."
+echo "Развертка YARN завершена."
