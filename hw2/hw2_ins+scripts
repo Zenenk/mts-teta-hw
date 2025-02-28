@@ -1,0 +1,208 @@
+===========================================================================
+ИНСТРУКЦИЯ ПО РАЗВЁРТЫВАНИЮ YARN И ПУБЛИКАЦИИ ВЕБ-ИНТЕРФЕЙСОВ
+===========================================================================
+
+1. ПОДГОТОВИТЬ И ПРОВЕРИТЬ КЛАСТЕР
+---------------------------------
+1.1. Проверить связь с внешним узлом:
+    $ ping <EXTERNAL_IP>
+
+1.2. Подключиться к bastion-узлу:
+    $ ssh <USER>@<EXTERNAL_IP>
+
+1.3. Переключиться на пользователя:
+    $ sudo -i -u <USERNAME>
+
+1.4. Подключиться к неймноде:
+    $ ssh <NAMENODE_HOSTNAME>
+
+1.5. Проверить запущенные процессы (jps) и наличие конфигурационных файлов:
+    $ jps
+    $ ls -l <HADOOP_INSTALL_DIR>/etc/hadoop/
+    $ cat <HADOOP_INSTALL_DIR>/etc/hadoop/core-site.xml
+    (Проверить, что все сохранено с предыдущей настройки)
+
+2. ФОРМАТИРОВАТЬ HDFS И ЗАПУСТИТЬ DFS (ЕСЛИ ЕЩЁ НЕ ЗАПУЩЕНО)
+----------------------------------------------------------
+2.1. На неймноде выполнить форматирование:
+    $ <HADOOP_INSTALL_DIR>/bin/hdfs namenode -format
+
+2.2. Запустить HDFS:
+    $ <HADOOP_INSTALL_DIR>/sbin/start-dfs.sh
+
+2.3. Проверить через jps, что запущены все необходимые демоны:
+    $ jps
+
+2.4. Выйти из сессии (exit) для возврата к предыдущему узлу.
+
+3. НАСТРОИТЬ NGINX ДЛЯ ПУБЛИКАЦИИ ВЕБ-ИНТЕРФЕЙСОВ
+------------------------------------------------
+3.1. На джамп-узле перейти в каталог конфигурации Nginx:
+    $ sudo vim /etc/nginx/sites-available/nn
+
+3.2. Создать два новых файла конфигурации на основе файла nn:
+    - Для ResourceManager (порт 8088):
+         $ sudo cp /etc/nginx/sites-available/nn /etc/nginx/sites-available/ya
+         $ sudo vim /etc/nginx/sites-available/ya
+         (Во всём файле заменить «9870» на «8088»)
+    - Для HistoryServer (порт 19888):
+         $ sudo cp /etc/nginx/sites-available/nn /etc/nginx/sites-available/dh
+         $ sudo vim /etc/nginx/sites-available/dh
+         (Во всём файле заменить «9870» на «19888»)
+
+3.3. Создать символические ссылки в каталоге sites-enabled:
+    $ sudo ln -s /etc/nginx/sites-available/ya /etc/nginx/sites-enabled/ya
+    $ sudo ln -s /etc/nginx/sites-available/dh /etc/nginx/sites-enabled/dh
+
+3.4. Перезагрузить Nginx и проверить его статус:
+    $ sudo systemctl reload nginx
+    $ sudo systemctl status nginx
+
+4. НАСТРОИТЬ YARN И MAPREDUCE
+-----------------------------
+4.1. На неймноде перейти в каталог конфигурации Hadoop:
+    $ cd <HADOOP_INSTALL_DIR>/etc/hadoop
+
+4.2. Отредактировать файл yarn-site.xml (если отсутствует – создать новый):
+    $ vim yarn-site.xml
+
+    Вставить следующий блок внутрь <configuration>:
+    ---------------------------------------------------------------------
+    <configuration>
+      <property>
+          <name>yarn.nodemanager.aux-services</name>
+          <value>mapreduce_shuffle</value>
+      </property>
+      <property>
+          <name>yarn.nodemanager.env-whitelist</name>
+          <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_HOME,PATH,LANG,TZ,HADOOP_MAPRED_HOME</value>
+      </property>
+      <property>
+          <name>yarn.resourcemanager.hostname</name>
+          <value><NAMENODE_HOSTNAME></value>
+      </property>
+      <property>
+          <name>yarn.resourcemanager.address</name>
+          <value><NAMENODE_HOSTNAME>:8032</value>
+      </property>
+      <property>
+          <name>yarn.resourcemanager.resource-tracker.address</name>
+          <value><NAMENODE_HOSTNAME>:8031</value>
+      </property>
+    </configuration>
+    ---------------------------------------------------------------------
+
+4.3. Отредактировать файл mapred-site.xml:
+    $ vim mapred-site.xml
+
+    Вставить следующий блок:
+    ---------------------------------------------------------------------
+    <configuration>
+      <property>
+          <name>mapreduce.framework.name</name>
+          <value>yarn</value>
+      </property>
+      <property>
+          <name>mapreduce.application.classpath</name>
+          <value>$HADOOP_HOME/share/hadoop/mapreduce/*:$HADOOP_HOME/share/hadoop/mapreduce/lib/*</value>
+      </property>
+    </configuration>
+    ---------------------------------------------------------------------
+
+4.4. Распространить файлы yarn-site.xml и mapred-site.xml на все узлы:
+    $ scp mapred-site.xml yarn-site.xml <SSH_USER>@<HOST_1>:<HADOOP_INSTALL_DIR>/etc/hadoop
+    $ scp mapred-site.xml yarn-site.xml <SSH_USER>@<HOST_2>:<HADOOP_INSTALL_DIR>/etc/hadoop
+    $ scp mapred-site.xml yarn-site.xml <SSH_USER>@<NAMENODE_HOSTNAME>:<HADOOP_INSTALL_DIR>/etc/hadoop
+
+5. ЗАПУСТИТЬ YARN
+------------------
+5.1. Подключиться к неймноде (<NAMENODE_HOSTNAME>):
+    $ ssh <SSH_USER>@<NAMENODE_HOSTNAME>
+
+5.2. Запустить YARN:
+    $ <HADOOP_INSTALL_DIR>/sbin/start-yarn.sh
+
+5.3. Проверить через jps, что запущены ResourceManager (на <NAMENODE_HOSTNAME>) и NodeManager (на рабочих узлах).
+
+6. ПРОВЕРИТЬ РАБОТУ HDFS
+-------------------------
+6.1. Под пользователем hadoop создать тестовую директорию в HDFS:
+    $ hdfs dfs -mkdir /test
+
+6.2. Проверить корневой каталог и директорию /test:
+    $ hdfs dfs -ls /
+    $ hdfs dfs -ls /test
+    (Ожидать, что /test окажется пустой)
+
+6.3. Скачать CSV-файл (любого формата) с помощью wget:
+    $ wget --no-check-certificate <URL_ФАЙЛА>
+
+6.4. Переложить CSV-файл в HDFS:
+    $ hdfs dfs -put <ИМЯ_ФАЙЛА> /test
+
+6.5. Проверить наличие файла:
+    $ hdfs dfs -ls /test
+    И убедиться, что файл отображается в веб-интерфейсе.
+
+7. СОЗДАТЬ SSH-ТУННЕЛЬ ДЛЯ ВНЕШНЕГО ДОСТУПА
+---------------------------------------------
+7.1. На рабочей машине создать SSH-туннель для проброса портов:
+    $ ssh -L 9870:127.0.0.1:9870 -L 8088:127.0.0.1:8088 -L 19888:127.0.0.1:19888 <SSH_USER>@<EXTERNAL_IP>
+
+7.2. После установки туннеля веб-интерфейсы будут доступны по следующим адресам:
+    - HDFS (NameNode): http://127.0.0.1:9870
+    - YARN (ResourceManager): http://127.0.0.1:8088
+    - HistoryServer: http://127.0.0.1:19888
+
+
+
+==================================================================================
+ИНСТРУКЦИЯ ДЛЯ РАЗВЁРТЫВАНИЯ YARN И ПУБЛИКАЦИИ ВЕБ-ИНТЕРФЕЙСОВ ЧЕРЕЗ BASH СКРИПТЫ 
+==================================================================================
+
+1. Подготовить окружение и пререквизиты:
+   - Проверить связь между узлами.
+   - Настроить файл /etc/hosts на всех узлах
+   - Настроить SSH-доступ для пользователей и проброс портов при необходимости.
+
+2. Скачать и скопировать bash‑скрипты:
+   - Сохранить следующие скрипты в одном каталоге (например, ~/scripts):
+       • deploy_yarn.sh   – для настройки и запуска YARN.
+       • configure_nginx.sh – для создания конфигураций Nginx и публикации веб-интерфейсов.
+       • start_ssh_tunnel.sh – для проброса портов для доступа к веб-интерфейсам.
+
+3. Сделать скрипты исполняемыми:
+   - Перейти в каталог со скриптами и выполнить:
+         chmod +x deploy_yarn.sh configure_nginx.sh start_ssh_tunnel.sh
+
+4. Настроить переменные окружения (при необходимости):
+   - Изменить или задать следующие переменные (либо через редактирование скриптов, либо через экспорт в терминале):
+         export MASTER_NODE="<NAMENODE_HOSTNAME>"
+         export DATANODES="<HOST_1> <HOST_2>"
+         export HADOOP_HOME="/home/hadoop/<HADOOP_VERSION>"
+         export SSH_USER="hadoop"
+
+5. Запустить скрипты по очереди:
+   5.1. Развернуть YARN и MapReduce:
+         - Выполнить скрипт deploy_yarn.sh для настройки файлов конфигурации (yarn-site.xml и mapred-site.xml), копирования их на все узлы и запуска YARN.
+           Команда:
+                 ./deploy_yarn.sh [ПУТЬ_К_CSV_ФАЙЛУ]
+	Путь является опциональным в качестве проверки корректной работы файловой системы.
+   
+   5.2. Настроить Nginx для публикации веб-интерфейсов:
+         - Выполнить скрипт configure_nginx.sh для создания конфигураций для ResourceManager (порт 8088) и HistoryServer (порт 19888) и перезагрузки Nginx.
+           Команда:
+                 ./configure_nginx.sh
+
+   5.3. Создать SSH-туннель для проброса портов:
+         - Выполнить скрипт start_ssh_tunnel.sh, передав в качестве параметров пользователя и внешний IP (если требуется).
+           Команда:
+                 ./start_ssh_tunnel.sh <USER> <EXTERNAL_IP>
+         - После установки туннеля веб-интерфейсы будут доступны по адресам:
+                 HDFS (NameNode): http://127.0.0.1:9870
+                 YARN (ResourceManager): http://127.0.0.1:8088
+                 HistoryServer: http://127.0.0.1:19888
+
+6. Проверить работоспособность:
+   - Перейти в браузере по проброшенным адресам и проверить отображение веб-интерфейсов.
+   - Подключиться к неймноде и выполнить команду jps для проверки запущенных демонов.
