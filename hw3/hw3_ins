@@ -1,0 +1,202 @@
+===========================================================================
+ИНСТРУКЦИЯ ПО АВТОМАТИЗИРОВАННОМУ РАЗВЁРТЫВАНИЮ APACHE HIVE
+===========================================================================
+
+ПРЕРЕКВИЗИТЫ:
+-------------
+1. Обеспечить налаженную связь между узлами (проверить с помощью команды: ping <EXTERNAL_IP>).
+2. Настроить корректное разрешение имён через файл /etc/hosts на всех узлах.
+3. Настроить безпарольный SSH-доступ между узлами для соответствующих пользователей (например, team и hadoop).
+4. Обеспечить наличие прав sudo для внесения системных изменений.
+5. Установить Java (например, OpenJDK 11) и настроить переменную JAVA_HOME.
+6. Скачивать и распаковать дистрибутив Hadoop (например, Hadoop 3.4.0) на всех узлах
+7. Установить Nginx на узле для публикации веб-интерфейсов (если требуется).
+8. Установить PostgreSQL (версия по выбору) и PostgreSQL-клиент для организации внешнего metastore.
+9. Обеспечить наличие дополнительных утилит (wget, tmux).
+
+===========================================================================
+ШАГ 1. РАЗВЕРНУТЬ EXTERNAL METASTORE НА POSTGRESQL
+===========================================================================
+1.1. Подключиться к узлу, на котором будет размещён PostgreSQL (например, <POSTGRES_HOST>):
+     $ ssh <USER>@<POSTGRES_HOST>
+
+1.2. Установить PostgreSQL (при необходимости):
+     $ sudo apt install postgresql postgresql-client
+
+1.3. Переключиться на пользователя postgres:
+     $ sudo -i -u postgres
+
+1.4. Создать базу данных metastore:
+     $ psql
+     postgres=# CREATE DATABASE metastore;
+     postgres=# CREATE USER hive WITH PASSWORD 'hiveMegaPass';
+     postgres=# GRANT ALL PRIVILEGES ON DATABASE metastore TO hive;
+     postgres=# ALTER DATABASE metastore OWNER TO hive;
+     postgres=# \q
+
+1.5. Отредактировать файл postgresql.conf (обычно /etc/postgresql/<VERSION>/main/postgresql.conf):
+     - После строки "# listen_addresses = 'localhost'" добавить:
+           listen_addresses = '<NAMENODE_HOSTNAME>'
+     - Изменить порт на <NEW_PORT> (например, 5433).
+
+1.6. Отредактировать файл pg_hba.conf (обычно /etc/postgresql/<VERSION>/main/pg_hba.conf):
+     - После строки, например, "host all all 127.0.0.1/32 scram-sha-256" добавить строки:
+           host metastore hive <ALLOWED_IP>/32 password
+           host metastore hive <ADDITIONAL_ALLOWED_IP>/32 password
+     - Сохранить изменения и перезапустить PostgreSQL:
+           $ sudo systemctl restart postgresql
+
+1.7. Проверить подключение к базе:
+     $ psql -h 127.0.0.1 -p <NEW_PORT> -U hive -W -d metastore
+
+===========================================================================
+ШАГ 2. РАЗВЁРНУТЬ APACHE HIVE
+===========================================================================
+2.1. Подключиться к джамп-узлу (например, <JUMP_HOST>) под пользователем hadoop:
+     $ sudo -i -u hadoop
+
+2.2. Скачать дистрибутив Hive 4.0.0‑alpha2:
+     $ wget https://archive.apache.org/dist/hive/hive-4.0.0-alpha-2/apache-hive-4.0.0-alpha-2-bin.tar.gz
+
+2.3. Распаковать архив:
+     $ tar -xzvf apache-hive-4.0.0-alpha-2-bin.tar.gz
+
+2.4. Перейти в каталог lib дистрибутива Hive:
+     $ cd apache-hive-4.0.0-alpha-2-bin/lib/
+
+2.5. Скачать PostgreSQL JDBC-драйвер:
+     $ wget https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
+
+2.6. Отредактировать файл конфигурации Hive (hive-site.xml), который находится в каталоге conf:
+     $ vim ../conf/hive-site.xml
+
+2.7. Вставить следующую конфигурацию (обновить плейсхолдеры):
+-------------------------------------------------------------------------
+<configuration>
+    <property>
+        <name>hive.server2.authentication</name>
+        <value>NONE</value>
+    </property>
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>/user/hive/warehouse</value>
+    </property>
+    <property>
+        <name>hive.server2.thrift.port</name>
+        <value>5433</value>
+        <description>TCP порт для прослушивания, по умолчанию 10000</description>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://<NAMENODE_HOSTNAME>:<NEW_PORT>/metastore</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hiveMegaPass</value>
+    </property>
+</configuration>
+-------------------------------------------------------------------------
+2.8. Добавить переменные окружения в профиль пользователя hadoop:
+     $ vim ~/.profile
+     Добавить строки:
+         export HIVE_HOME=/home/hadoop/apache-hive-4.0.0-alpha-2-bin
+         export HIVE_CONF_DIR=$HIVE_HOME/conf
+         export HIVE_AUX_JARS_PATH=$HIVE_HOME/lib/*
+         export PATH=$PATH:$HIVE_HOME/bin
+     Сохранить изменения и выполнить:
+         $ source ~/.profile
+
+===========================================================================
+ШАГ 3. НАСТРОИТЬ HDFS ДЛЯ HIVE
+===========================================================================
+3.1. Проверить наличие корневого каталога HDFS:
+     $ hdfs dfs -ls /
+
+3.2. Создать каталог для склада Hive и обеспечить права доступа:
+     $ hdfs dfs -mkdir -p /user/hive/warehouse
+     $ hdfs dfs -chmod g+w /tmp
+     $ hdfs dfs -chmod g+w /user/hive/warehouse
+
+3.3. Инициализировать схему metastore:
+     $ <HIVE_HOME>/bin/schematool -dbType postgres -initSchema
+
+===========================================================================
+ШАГ 4. ЗАПУСТИТЬ HIVE SERVER2 И ЗАГРУЗИТЬ ДАННЫЕ
+===========================================================================
+4.1. Запустить HiveServer2 (с целью обеспечить одновременный доступ нескольких клиентов)
+     (Рекомендуется запускать в отдельном tmux-сессии)
+     $ tmux
+     $ hive --hiveconf hive.server2.enable.doAs=false --hiveconf hive.security.authorization.enable=true
+     Либо запустить как службу, перенаправив вывод в лог:
+     $ <HIVE_HOME>/sbin/hiveserver2 1>> /tmp/hs2.log 2>> /tmp/hs2.log &
+     Выйти из tmux.
+
+4.2. Подключиться к Hive с помощью beeline:
+     $ beeline -u jdbc:hive2://<NAMENODE_HOSTNAME>:<HS2_PORT> -n <USER> -p <PASSWORD>
+     (Например, использовать плейсхолдеры вместо конкретных данных)
+
+4.3. Создать базу данных и партиционированную таблицу:
+     В Beeline выполнить:
+         CREATE DATABASE test;
+         USE test;
+         -- Создать таблицу с партиционированием (например, по дате)
+         CREATE TABLE colours (
+             colour STRING,
+             number INT
+         )
+         PARTITIONED BY (dt STRING)
+         COMMENT 'Table Colours'
+         ROW FORMAT DELIMITED
+         FIELDS TERMINATED BY '\t'
+         STORED AS TEXTFILE;
+         SHOW TABLES;
+
+4.4. Загрузить данные в таблицу:
+     Предположить, что на HDFS существует директория с данными (например, /test) и файл (например, colours.tsv)
+         $ hdfs dfs -ls /test
+         $ hdfs dfs -put <PATH_TO_COLOURS_FILE> /test
+         В Beeline выполнить:
+         LOAD DATA INPATH '/test/colours.tsv' INTO TABLE colours PARTITION (dt='<PARTITION_VALUE>');
+         (Заменить <PARTITION_VALUE> на нужное значение, например, дату)
+         SHOW TABLES;
+         SELECT * FROM colours;
+
+
+
+===========================================================================
+ИНСТРУКЦИЯ ДЛЯ РАЗВЁРТЫВАНИЯ APACHE HIVE ЧЕРЕЗ BASH СКРИПТЫ
+===========================================================================
+
+0. Подготовить следующие скрипты и сохранить их в одном каталоге (например, ~/hive-scripts):
+  1. setup_metastore.sh      – для настройки PostgreSQL в качестве внешнего metastore.
+  2. setup_hive.sh            – для установки и настройки Apache Hive.
+  3. load_data.sh   – для запуска HiveServer2 и загрузки данных в таблицу.
+
+1. Перейти в каталог, где сохранены скрипты:
+       cd ~/hive-scripts
+
+2. Сделать скрипты исполняемыми:
+       chmod +x setup_metastore.sh setup_hive.sh load_data.sh
+
+3. При необходимости задать переменные окружения (либо отредактировать скрипты):
+       export NAMENODE_HOSTNAME="<NAMENODE_HOSTNAME>"
+       export NEW_PORT="<NEW_PORT>"            # например, 5433 для PostgreSQL
+       export ALLOWED_IPS="<ALLOWED_IP1> <ALLOWED_IP2>"  # список разрешённых IP для подключения к metastore
+       export HADOOP_HOME="/home/hadoop/<HADOOP_VERSION>"  # путь к установленному Hadoop
+       export HS2_PORT="<HS2_PORT>"              # порт для HiveServer2 (например, 5433)
+
+4. Запустить скрипты по очереди:
+           ./setup_metastore.sh
+           ./setup_hive.sh
+           ./load_data.sh
+
+
+
