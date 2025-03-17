@@ -1,0 +1,162 @@
+===========================================================================
+ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ APACHE SPARK
+===========================================================================
+
+===========================================================================
+ШАГ 1. ПОДГОТОВИТЬ ОКРУЖЕНИЕ ДЛЯ APACHE SPARK
+===========================================================================
+1.1. На джамп-узле (или на узле, где будет запускаться Spark) установить необходимые пакеты:
+    $ sudo apt install python3-venv python3-pip
+
+1.2. Скачать дистрибутив Apache Spark:
+    $ wget https://archive.apache.org/dist/spark/spark-3.5.3/spark-3.5.3-bin-hadoop3.tgz
+
+1.3. Перейти в домашний каталог пользователя и распаковать архив:
+    $ tar -xzvf spark-3.5.3-bin-hadoop3.tgz
+
+1.4. Проверить наличие необходимых jar-файлов для интеграции с Hive:
+    $ ls -l spark-3.5.3-bin-hadoop3/jars/ | grep hive
+
+1.5. Настроить переменные окружения для Spark, HADOOP и HIVE. Пример добавления в профиль (например, ~/.profile):
+    export HADOOP_CONF_DIR="/home/hadoop/<HADOOP_INSTALL_DIR>/etc/hadoop"
+    export HIVE_HOME="/home/hadoop/<HIVE_INSTALL_DIR>"
+    export HIVE_CONF_DIR=$HIVE_HOME/conf
+    export HIVE_AUX_JARS_PATH=$HIVE_HOME/lib/*
+    export PATH=$PATH:$HIVE_HOME/bin
+
+1.6. Настроить переменные для Spark:
+    export SPARK_LOCAL_IP=<LOCAL_IP_ADDRESS>
+    export SPARK_DIST_CLASSPATH="/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/common:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/common/lib/*:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/hdfs:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/hdfs/lib/*:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/mapreduce:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/mapreduce/lib/*:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/yarn:\
+/home/hadoop/<HADOOP_INSTALL_DIR>/share/hadoop/yarn/lib/*"
+    (Заменить <HADOOP_INSTALL_DIR> на соответствующий путь и <LOCAL_IP_ADDRESS> на IP узла.)
+
+1.7. Установить и настроить Python‑виртуальное окружение:
+    $ cd /home/hadoop
+    $ python3 -m venv venv
+    $ source venv/bin/activate
+    $ pip install -U pip
+    $ pip install ipython onetl[files]
+    (Библиотека onetl используется для удобного подключения к HDFS и Hive.)
+
+===========================================================================
+ШАГ 2. ПОДГОТОВИТЬ ДАННЫЕ
+===========================================================================
+2.1. Проверить наличие данных в HDFS:
+    $ hdfs dfs -ls /
+    $ hdfs dfs -ls /input
+
+2.2. Загрузить CSV-файл в каталог HDFS:
+    $ hdfs dfs -put <LOCAL_PATH_TO_CSV>/<FILENAME>.csv /input
+
+===========================================================================
+ШАГ 3. ЗАПУСТИТЬ SPARK-СЕССИЮ ПОД УПРАВЛЕНИЕМ YARN И ЗАПУСТИТЬ SPARK-ЗАДАНИЕ
+===========================================================================
+3.1. Перейти в каталог с распакованным Spark:
+    $ cd spark-3.5.3-bin-hadoop3
+    $ export SPARK_HOME=`pwd`
+    $ export PYTHONPATH=$(for z in "$SPARK_HOME"/python/lib/*.zip; do echo -n "$z:"; done)$PYTHONPATH
+    $ export PATH=$SPARK_HOME/bin:$PATH
+
+3.2. Запустить IPython в виртуальном окружении:
+    $ ipython
+
+3.3. В IPython выполнить следующий код для запуска Spark-сессии, чтения данных из HDFS, трансформации и записи в Hive:
+--------------------------------------------------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from onetl.connection import SparkHDFS
+from onetl.connection import Hive
+from onetl.file import FileDFReader
+from onetl.file.format import CSV
+from onetl.db import DBWriter
+
+spark = SparkSession.builder \
+            .master("yarn") \
+            .appName("spark-with-yarn") \
+            .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
+            .config("spark.hive.metastore.uris", "thrift://<NAMENODE_HOSTNAME>:<HS2_METASTORE_PORT>") \
+            .enableHiveSupport() \
+            .getOrCreate()
+
+hdfs = SparkHDFS(host="<NAMENODE_HOSTNAME>", port=9000, spark=spark, cluster="test")
+hdfs.check()
+
+reader = FileDFReader(connection=hdfs, format=CSV(delimeter=",", header=True), source_path="/input")
+df = reader.run(["for_spark.csv"])
+
+df_transformed = df.withColumn("number", df["number"].cast("int")) \
+                   .groupBy("colour").agg(F.sum("number").alias("total_number"))
+
+print(df_transformed.count())
+df_transformed.printSchema()
+print(df_transformed.rdd.getNumPartitions())
+
+hive = Hive(spark=spark, cluster="test")
+
+writer = DBWriter(connection=hive, table="test.spark_partitions", options={"if_exists": "replace_entire_table", "partitionBy": "colour"})
+writer.run(df_transformed)
+
+spark.stop()
+--------------------------------------------------------------------------------
+3.4. Завершить работу IPython.
+
+===========================================================================
+ШАГ 4. ПРОВЕРИТЬ РАБОТУ
+===========================================================================
+4.1. Подключиться к Hive через стандартный клиент (например, Beeline):
+    $ beeline -u jdbc:hive2://<NAMENODE_HOSTNAME>:<HS2_PORT> -n <USER> -p <PASSWORD>
+4.2. В Hive выполнить запрос SELECT к таблице test.spark_partitions и убедиться, что данные корректно загружены.
+
+
+
+===========================================================================
+ИНСТРУКЦИЯ ПО ЗАПУСКУ BASH-СКРИПТОВ
+===========================================================================
+
+СТРУКТУРА ФАЙЛОВ:
+-------------------
+В одном каталоге подготовить следующие файлы:
+  • setup_spark_env.sh    – подготовка окружения для Spark (скачивание, распаковка, создание venv, установка зависимостей)
+  • run_spark_job.sh      – запуск Spark-задачи через spark-submit
+  • spark_job.py          – Python-скрипт, который создаёт Spark-сессию, считывает данные из HDFS, выполняет трансформации и записывает данные в Hive
+
+
+
+ИНСТРУКЦИЯ ПО ЗАПУСКУ:
+----------------------
+
+ШАГ 1. ПЕРЕЙТИ В КАТАЛОГ СО СКРИПТАМИ:
+    $ cd ~/spark-scripts
+
+ШАГ 2. СДЕЛАТЬ ФАЙЛЫ ИСПОЛНЯЕМЫМИ:
+    $ chmod +x setup_spark_env.sh run_spark_job.sh
+
+ШАГ 3. (При необходимости) ЗАДАТЬ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ:
+    Например, можно экспортировать следующие переменные:
+      export NAMENODE_HOSTNAME="<NAMENODE_HOSTNAME>"
+      export HS2_METASTORE_PORT="<HS2_METASTORE_PORT>"   # порт metastore HiveServer2, например, 5433
+      export VENV_DIR="/home/hadoop/venv"                # путь к виртуальному окружению
+      export HADOOP_HOME="/home/hadoop/<HADOOP_INSTALL_DIR>"
+      (и другие переменные, используемые в скриптах)
+
+ШАГ 4. ЗАПУСТИТЬ СКРИПТ ПОДГОТОВКИ ОКРУЖЕНИЯ:
+    $ ./setup_spark_env.sh
+    - Скрипт скачать и распаковать Spark, создать Python‑виртуальное окружение и установить зависимости.
+
+ШАГ 5. ЗАПУСТИТЬ SPARK-ЗАДАНИЕ:
+    $ ./run_spark_job.sh
+    - Скрипт активировать виртуальное окружение, установить переменные Spark, и запустить spark-submit,
+      который выполнит Python-скрипт (spark_job.py) с заданием.
+      
+ШАГ 6. ПРОВЕРИТЬ РАБОТУ:
+    - Проверить вывод скриптов на наличие ошибок.
+    - Подключиться к Hive (например, через beeline) и выполнить запрос SELECT к таблице, созданной в задании:
+         $ beeline -u jdbc:hive2://<NAMENODE_HOSTNAME>:<HS2_PORT> -n <USER> -p <PASSWORD>
+    - Убедиться, что данные корректно загружены.
+
