@@ -1,0 +1,102 @@
+===========================================================================
+ИНСТРУКЦИЯ ПО ОБРАБОТКЕ ДАННЫХ С ИСПОЛЬЗОВАНИЕМ APACHE SPARK
+===========================================================================
+
+1. Подготовить окружение:
+   - Убедиться, что развернуты HDFS, YARN и Hive.
+   - Настроить переменные окружения:
+         HADOOP_CONF_DIR, HADOOP_HOME, HIVE_HOME, HIVE_CONF_DIR, SPARK_HOME и т.д.
+   - Проверить корректность файла /etc/hosts (с обобщёнными плейсхолдерами, например,
+         <NAMENODE_HOSTNAME>, <HOST1>, <HOST2>, …).
+
+2. Запустить сессию Apache Spark под управлением YARN:
+   - Подключиться к узлу, где установлен Spark (например, через SSH).
+   - Запустить интерактивную сессию:
+         $ pyspark --master yarn --deploy-mode client
+      или запустить задачу через spark-submit:
+         $ spark-submit --master yarn --deploy-mode client /path/to/your_script.py
+
+3. Подключиться к кластеру HDFS:
+   - Выполнить:
+         $ hdfs dfs -ls /
+      чтобы убедиться, что данные доступны (например, в каталоге /input).
+
+4. Прочитать данные и выполнить трансформации с использованием Spark:
+   - В интерактивной сессии или Python‑скрипте выполнить:
+     a) Создать Spark‑сессию с поддержкой Hive:
+          from pyspark.sql import SparkSession
+          spark = SparkSession.builder \
+                     .appName("DataProcessingJob") \
+                     .master("yarn") \
+                     .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
+                     .config("spark.hive.metastore.uris", "thrift://<NAMENODE_HOSTNAME>:<HS2_METASTORE_PORT>") \
+                     .enableHiveSupport() \
+                     .getOrCreate()
+     b) Считать данные:
+          df = spark.read.format("csv") \
+                     .option("header", "true") \
+                     .option("inferSchema", "true") \
+                     .load("hdfs://<NAMENODE_HOSTNAME>:<HDFS_PORT>/input/data.csv")
+     c) Применить трансформации:
+          from pyspark.sql import functions as F
+          df_transformed = df.withColumn("number", df["number"].cast("int")) \
+                              .groupBy("category").agg(F.sum("number").alias("total_number"))
+     d) Сохранить результат как таблицу Hive:
+          df_transformed.write.mode("overwrite").saveAsTable("default.transformed_data")
+     e) Завершить работу Spark‑сессии:
+          spark.stop()
+
+5. Проверить результат:
+   - Подключиться к Hive (например, через beeline):
+         $ beeline -u jdbc:hive2://<NAMENODE_HOSTNAME>:<HS2_PORT> -n <USER> -p <PASSWORD>
+   - Выполнить запрос:
+         SELECT * FROM default.transformed_data;
+   - Убедиться, что данные корректно сохранены.
+
+
+
+===========================================================================================
+ИНСТРУКЦИЯ ПО ОБРАБОТКЕ ДАННЫХ С ИСПОЛЬЗОВАНИЕМ APACHE SPARK С ИПОЛЬЗОВАНИЕМ BASH СКРИПТОВ
+===========================================================================================
+
+В данном разделе представлены скрипты, автоматизирующие процесс обработки данных. Они должны быть сохранены в одном каталоге. Структура файлов:
+
+  - setup_spark_env.sh    – Подготовить окружение для Apache Spark:
+         - Скачать и распаковать дистрибутив Apache Spark.
+         - Создать Python‑виртуальное окружение и установить зависимости (ipython, onetl).
+  
+  - run_spark_job.sh      – Запустить Spark‑задачу через spark-submit:
+         - Активировать виртуальное окружение, установить переменные (SPARK_HOME, PATH, PYTHONPATH) и выполнить скрипт.
+  
+  - spark_pipeline.py     – Python‑скрипт, реализующий процесс:
+         - Создать Spark‑сессию с поддержкой Hive (под управлением YARN).
+         - Прочитать данные из HDFS, выполнить трансформации и сохранить данные как таблицу Hive.
+
+Инструкция по запуску:
+
+Шаг 1. Перейти в каталог со скриптами:
+       $ cd ~/spark-pipeline
+
+Шаг 2. Сделать скрипты исполняемыми:
+       $ chmod +x setup_spark_env.sh run_spark_job.sh
+
+Шаг 3. Экспортировать переменные окружения:
+       export NAMENODE_HOSTNAME="<NAMENODE_HOSTNAME>"
+       export HDFS_PORT="<HDFS_PORT>"
+       export HS2_METASTORE_PORT="<HS2_METASTORE_PORT>"
+       export VENV_DIR="/home/hadoop/venv"
+       export HADOOP_HOME="/home/hadoop/<HADOOP_INSTALL_DIR>"
+
+Шаг 4. Запустить скрипт подготовки окружения:
+       $ ./setup_spark_env.sh
+       - Скрипт скачает и распакует Spark, создаст виртуальное окружение и установит зависимости.
+
+Шаг 5. Запустить Spark‑задачу:
+       $ ./run_spark_job.sh
+       - Скрипт активирует виртуальное окружение, установит переменные для Spark и выполнит spark-submit, который запустит Python‑скрипт (spark_pipeline.py).
+
+Шаг 6. Проверить результат:
+       - Проверить вывод скриптов на наличие ошибок.
+       - Подключиться к Hive через beeline (или другой клиент) и выполнить запрос:
+             SELECT * FROM default.transformed_data;
+         чтобы убедиться, что данные корректно обработаны и сохранены.
